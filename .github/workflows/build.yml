@@ -1,0 +1,102 @@
+name: Build Android Kernel with KernelSU
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Setup build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            ccache \
+            libssl-dev \
+            libelf-dev \
+            wget \
+            curl \
+            git \
+            python3 \
+            python3-dev \
+            libtinfo5 \
+            device-tree-compiler
+
+      - name: Clone Mist OS Kernel Source
+        run: |
+          git clone --depth=1 https://github.com/Project-Mist-OS/android_kernel_motorola_devonf -b 14 ${{ github.workspace }}/kernel
+
+      - name: Download clang toolchain (clang-r416183b)
+        run: |
+          echo "Downloading clang-r416183b toolchain..."
+          mkdir -p ${{ github.workspace }}/toolchain
+          cd ${{ github.workspace }}/toolchain
+          git clone --depth=1 https://gitlab.com/reagxk/clang-r416183b.git clang
+          echo "TOOLCHAIN_PATH=${{ github.workspace }}/toolchain/clang" >> $GITHUB_ENV
+
+      - name: Inject KernelSU via setup.sh
+        run: |
+          echo "Injecting KernelSU..."
+          cd ${{ github.workspace }}/kernel
+          curl -LSs "https://raw.githubusercontent.com/tkeyly/KernelSU/main/kernel/setup.sh" | bash -
+
+      - name: Build kernel Image.gz
+        run: |
+          cd ${{ github.workspace }}/kernel
+          
+          export TOOLCHAIN_PATH="${{ env.TOOLCHAIN_PATH }}"
+          export PATH="${TOOLCHAIN_PATH}/bin:${PATH}"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE="${TOOLCHAIN_PATH}/bin/aarch64-linux-gnu-"
+          export CROSS_COMPILE_ARM32="${TOOLCHAIN_PATH}/bin/arm-linux-gnueabihf-"
+          export CC="${TOOLCHAIN_PATH}/bin/clang"
+          export CXX="${TOOLCHAIN_PATH}/bin/clang++"
+          export LD="${TOOLCHAIN_PATH}/bin/ld.lld"
+          export AR="${TOOLCHAIN_PATH}/bin/llvm-ar"
+          export NM="${TOOLCHAIN_PATH}/bin/llvm-nm"
+          export OBJCOPY="${TOOLCHAIN_PATH}/bin/llvm-objcopy"
+          export OBJDUMP="${TOOLCHAIN_PATH}/bin/llvm-objdump"
+          export STRIP="${TOOLCHAIN_PATH}/bin/llvm-strip"
+          export READELF="${TOOLCHAIN_PATH}/bin/llvm-readelf"
+          
+          DEFCONFIG="devonf_defconfig"
+          if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
+            echo "⚠️ Config padrão não encontrado, procurando alternativas..."
+            DEFCONFIG=$(find arch/arm64/configs -name "*defconfig" | head -1 | xargs basename)
+            echo "Usando: ${DEFCONFIG}"
+          fi
+          
+          echo "📦 Configurando kernel com ${DEFCONFIG}..."
+          make O=out ${DEFCONFIG}
+          
+          echo "🔨 Compilando Image.gz (usando $(nproc) cores)..."
+          make -j$(nproc) O=out Image.gz
+
+      - name: Verify build output
+        run: |
+          BUILD_OUTPUT="${{ github.workspace }}/kernel/out/arch/arm64/boot/Image.gz"
+          
+          if [ -f "${BUILD_OUTPUT}" ]; then
+            SIZE=$(du -h "${BUILD_OUTPUT}" | cut -f1)
+            echo "✅ Image.gz compilada com sucesso!"
+            echo "📊 Tamanho: ${SIZE}"
+          else
+            echo "❌ Image.gz não encontrada!"
+            exit 1
+          fi
+
+      - name: Upload Image.gz as artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image-gz-devonf
+          path: kernel/out/arch/arm64/boot/Image.gz
+          retention-days: 30
+          if-no-files-found: error
